@@ -125,7 +125,7 @@ contains
     implicit none
 
     ! arguments
-    type (gspace), intent(inout):: gvec
+    type (gspace), intent(in):: gvec
     SCALAR, intent(inout) :: rho(gvec%nr)
     integer, intent(in) :: irp
 

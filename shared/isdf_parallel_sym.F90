@@ -42,9 +42,10 @@
 !
 ! This subroutine calculates the interpolation vectors zeta_u(r)
 ! 
-! n_intp : the number of interpolation vectors or points, or Nu
-! intp   : the index of interpolation points in the full grid
-! zeta(gvec%nr*gvec%sym, n_intp) : the interpolation vectors 
+! n_intp   : the number of interpolation vectors or points, or Nu
+! n_intp_r : the number of interpolation vectors or points in reduced r-space domain
+! intp     : the index of interpolation points in the full grid
+! zeta(gvec%nr, n_intp_r) : the interpolation vectors 
 ! kpt%wfn(isp,ikp)%dwf(:,:) : store the wavefunctions \phi_i, \psi_j
 !
 ! For now, this is only partially parallelized
@@ -103,20 +104,20 @@ subroutine isdf_parallel_sym( gvec, pol_in, kpt, n_intp_r, intp_r, &
   ! If verbose is true, then print out additional debug information
   logical, intent(in) :: verbose
 
-  ! --- Local variables ---
-  ! P(gvec%mydim, Nu, nspin, kpt%nk)
-  ! Q(gvec%mydim, Nu, nspin, kpt%nk)
-  ! Cmtrx(n_intp, Nc*Nv, nspin, kpt%nk)
+  ! ------------------ Local variables ------------------
+  ! P(gvec%mydim, n_intp_r, nspin, kpt%nk)
+  ! Q(gvec%mydim, n_intp_r, nspin, kpt%nk)
+  ! Cmtrx(n_intp_r, Nc*Nv, nspin, kpt%nk)
   ! Issue need to be addressed: if there are N wfn_grp, does it mean these matrix need to be
   ! calculated by all processors at the same time, or can we distribute the workload
   ! later ??
-  real(dp), allocatable ::        &
-     PsiV(:,:), PsiV_intp(:,:),   &   ! PsiV: wfn on reduced domain
-     PsiC(:,:), PsiC_intp(:,:),   &
-     P(:,:), P_intp(:,:),         &   ! P on reduced domain 
-     Q(:,:), Q_intp(:,:),         &   ! Q on reduced domain 
+  real(dp), allocatable ::            &
+     PsiV(:,:,:), PsiV_intp(:,:,:),   &   ! PsiV: wfn on reduced domain
+     PsiC(:,:,:), PsiC_intp(:,:,:),   &
+     P(:,:,:), P_intp(:,:,:),         &   ! P on reduced domain 
+     Q(:,:,:), Q_intp(:,:,:),         &   ! Q on reduced domain 
      zeta(:,:,:,:), tmp_Zmtrx(:), Zmtrx(:), Zmtrx_loc(:), &
-     fxc(:,:,:), fxc_loc(:,:,:), fzeta(:,:), &
+     fxc(:,:,:), fxc_loc(:,:,:), fzeta(:), &
      ! matrices and vectors used for solving linear equations
      Amtrx(:,:), Bmtrx(:,:), Xmtrx(:,:), tmpmtrx(:,:,:,:), &
      rho_h(:), rho_h_distr(:)
@@ -124,9 +125,9 @@ subroutine isdf_parallel_sym( gvec, pol_in, kpt, n_intp_r, intp_r, &
      vcharac(gvec%syms%ntrans), ccharac(gvec%syms%ntrans)
   integer, allocatable :: inv_ivlist(:,:,:,:), inv_iclist(:,:,:,:)
   ! counters and temporary integers
-  integer :: ipt, ii, jj, iv, ic, icv, & 
-             IVV, ICC, JVV, JCC, itrans, isp, ikp, errinfo, igrid, &
-             iproc, tag, ivrp, icrp, ipair1, ipair2, isp1, isp2, maxivv, maxicc
+  integer :: ipt, ii, jj, iv, ic, icv, irp, jrp, rsp, csp, i_row, i_col, lrp1, lrp2, & 
+             IVV, ICC, JVV, JCC, isp, ikp, errinfo, ipe, &
+             ivrp, icrp, maxivv, maxicc
   integer :: status, mpi_status(MPI_STATUS_SIZE)
   ! The index of w_grp, r_grp, processor that works on the calculation of
   ! zeta(:,:,nspin,nk)
@@ -138,9 +139,9 @@ subroutine isdf_parallel_sym( gvec, pol_in, kpt, n_intp_r, intp_r, &
   ! temporary dummy variable
   integer, dimension(0:w_grp%npes-1) :: idum
   ! the number of grid points in irreducible wedge, ngr = gvec%nr
-  integer :: ngr 
+  integer :: ngr, ngrid
   ! the number of full grid point, ngf = ngr * (# of sym operations)
-  integer :: ngf, ngfl, istart, iend, iptf, iptr, ioff1, ioff2
+  integer :: ngfl, iptf, iptr, ioff, ioff1, ioff2
 
   ! variables for debug and test of accuracy 
   character(50) :: dbg_filename = "isdf_dbg.dat"
@@ -162,10 +163,9 @@ subroutine isdf_parallel_sym( gvec, pol_in, kpt, n_intp_r, intp_r, &
      !
   endif
   !
+  ngrid= w_grp%mydim
   ! the number of real-space grid points in reduced real-space domain
   ngr = gvec%nr 
-  ! the number of grid points in full real-space domain, gvec%syms%ntrans is the number of sym ops
-  ngf = gvec%nr * gvec%syms%ntrans 
   ! the number of grid points of interpolation vectors zeta(:) stored in each processor
   ngfl = w_grp%mydim * gvec%syms%ntrans
   !
@@ -180,10 +180,10 @@ subroutine isdf_parallel_sym( gvec, pol_in, kpt, n_intp_r, intp_r, &
   ALLOCATE(Bmtrx (n_intp_r,    w_grp%mydim                ))
   ALLOCATE(Xmtrx (n_intp_r,    w_grp%mydim                ))
   ALLOCATE(zeta  (w_grp%mydim, n_intp_r, nspin, gvec%syms%ntrans )) ! interpolation vectors
-  ALLOCATE(PsiV( w_grp%mydim,   maxnv ))
-  ALLOCATE(PsiV_intp( n_intp_r, maxnv ))
-  ALLOCATE(PsiC( w_grp%mydim,   maxnc ))
-  ALLOCATE(PsiC_intp( n_intp_r, maxnc ))
+  ALLOCATE(PsiV( w_grp%mydim,   maxnv, gvec%syms%ntrans))
+  ALLOCATE(PsiV_intp( n_intp_r, maxnv, gvec%syms%ntrans ))
+  ALLOCATE(PsiC( w_grp%mydim,   maxnc, gvec%syms%ntrans ))
+  ALLOCATE(PsiC_intp( n_intp_r, maxnc, gvec%syms%ntrans ))
   !
   ! initialize matrices with zero
   !
@@ -233,7 +233,7 @@ subroutine isdf_parallel_sym( gvec, pol_in, kpt, n_intp_r, intp_r, &
         !
         do irp = 1, gvec%syms%ntrans
            do iv = 1, nv(isp,ikp,irp)
-              IVV = ivlist(iv, isp, ikp irp)
+              IVV = ivlist(iv, isp, ikp, irp)
               inv_ivlist(IVV, isp, ikp, irp) = iv
            enddo
            !
@@ -247,7 +247,7 @@ subroutine isdf_parallel_sym( gvec, pol_in, kpt, n_intp_r, intp_r, &
      enddo
   enddo 
   !
-  Mmtrx = zero ! Mmtrx dimension: Mmtrx(n_intp, n_intp, nspin, nspin)
+  Mmtrx = zero ! Mmtrx dimension: Mmtrx(n_intp_r, n_intp_r, nspin, nspin)
   !
   ! qkt is set to zero. This is only valid for
   !  tests of nonperiodic system, and should be updated later.
@@ -273,7 +273,7 @@ subroutine isdf_parallel_sym( gvec, pol_in, kpt, n_intp_r, intp_r, &
   if ( kflag > 0 ) then
      !
      ALLOCATE( fxc( w_grp%mydim, nspin, nspin ), stat = errinfo )
-     ALLOCATE( fzeta(ngfl, nspin), stat = errinfo )
+     ALLOCATE( fzeta(ngfl), stat = errinfo )
      fxc = zero
      ! 
      ! Copy the charge density to fxc
@@ -295,7 +295,7 @@ subroutine isdf_parallel_sym( gvec, pol_in, kpt, n_intp_r, intp_r, &
         !
         ! The following loop calculate P(r,r_u,jrp), Q(r,r_u,jrp) for all representations 
         !
-        do jrp = 1, gvec%syms
+        do jrp = 1, gvec%syms%ntrans
            !
            ! initialize matrices with zero
            !
@@ -376,8 +376,8 @@ subroutine isdf_parallel_sym( gvec, pol_in, kpt, n_intp_r, intp_r, &
               ivrp = kpt%wfn(isp,ikp)%irep(IVV)
               ICC  = invpairmap(2,icv,isp,ikp,jrp)
               icrp = kpt%wfn(isp,ikp)%irep(ICC)
-              Cmtrx(1:n_intp_r, icv, isp, ikp, jrp) = PsiV_intp(1:n_intp_r, inv_ivlist(IVV,isp,ikp,ivrp)) * &
-                PsiC_intp(1:n_intp_r, inv_iclist(ICC,isp,ikp,icrp)) ! This is element-wise multiplication
+              Cmtrx(1:n_intp_r, icv, isp, ikp, jrp) = PsiV_intp(1:n_intp_r, inv_ivlist(IVV,isp,ikp,ivrp), ivrp) * &
+                PsiC_intp(1:n_intp_r, inv_iclist(ICC,isp,ikp,icrp), icrp) ! This is element-wise multiplication
            enddo
         enddo
         !
@@ -385,7 +385,6 @@ subroutine isdf_parallel_sym( gvec, pol_in, kpt, n_intp_r, intp_r, &
         !
         do jrp = 1, gvec%syms%ntrans/r_grp%num
            irp = r_grp%g_rep(jrp)
-           write(outdbg, '(a,i4,2(a,i2)))')  " iq=", iq, ", jrp=", jrp, ", irp=", irp
            Amtrx = zero
            Bmtrx = zero
            Xmtrx = zero
@@ -409,10 +408,10 @@ subroutine isdf_parallel_sym( gvec, pol_in, kpt, n_intp_r, intp_r, &
               ! zeta^T = A^-1 * B = (C * C^T)^-1 * C * Z^T
               !
               !  Matrix dimensions:
-              !  zeta(ngfl, n_intp,:,:)
-              !  Amtrx(n_intp,n_intp)       intermediate variable, store C * C^T
-              !  Bmtrx(n_intp,w_grp%mydim)  intermediate variable, store C * Z^T
-              !  Xmtrx(n_intp,w_grp%mydim)         intermediate variable, store zeta^T
+              !  zeta(ngfl, n_intp_r, :, :)
+              !  Amtrx(n_intp_r, n_intp_r)       intermediate variable, store C * C^T
+              !  Bmtrx(n_intp_r, w_grp%mydim)  intermediate variable, store C * Z^T
+              !  Xmtrx(n_intp_r, w_grp%mydim)         intermediate variable, store zeta^T
               ! ---------------------
               !
               ! calculate A = P_intp.Q_intp (Note: This is an element-wise multipliation)
@@ -427,8 +426,8 @@ subroutine isdf_parallel_sym( gvec, pol_in, kpt, n_intp_r, intp_r, &
               !
               ! calculate B = (P.Q)^T (Note: This is an element-wise multiplication)
               !
-              Bmtrx(1:n_intp_r,1:w_grp%mydim) = transpose( P(1:w_grp%mydim, 1:n_intp, lrp1) * 
-                                              Q(1:w_grp%mydim, 1:n_intp, lrp2) )
+              Bmtrx(1:n_intp_r,1:w_grp%mydim) = transpose( P(1:w_grp%mydim, 1:n_intp_r, lrp1) * &
+                                              Q(1:w_grp%mydim, 1:n_intp_r, lrp2) )
               !
               if ( verbose .and. w_grp%master ) then
                  write(dbgunit,'(" B = C*Z^T = P*Q = ")')
@@ -454,13 +453,13 @@ subroutine isdf_parallel_sym( gvec, pol_in, kpt, n_intp_r, intp_r, &
         !
      enddo ! isp loop
      !
-     do jrp = 1, gvec%syms%ntrans%/r_grp%num
+     do jrp = 1, gvec%syms%ntrans/r_grp%num
         ! jrp is the index of representation belong to this r_grp
         ! irp is the real index of the representation
         irp = r_grp%g_rep(jrp)
         !
         ! Now calculate <zeta_u(r,ispin)|V(r,r')|zeta_w(r',jspin)>, where u, w = 1, ..., n_intp
-        !  and store it in Mmtrx(n_intp, n_intp)
+        !  and store it in Mmtrx(n_intp_r, n_intp_r)
         !
         do rsp = 1, nspin
            do csp = 1, nspin
@@ -486,7 +485,7 @@ subroutine isdf_parallel_sym( gvec, pol_in, kpt, n_intp_r, intp_r, &
                       zeta( 1, ii, rsp, irp ), 1, &
                       rho_h_distr( ioff ), 1 )
                     if ( kflag > 0 ) then
-                       call dcopy( ngrid, zeta( 1, ii, rsp, ikp, irp ), 1, &
+                       call dcopy( ngrid, zeta( 1, ii, rsp, irp ), 1, &
                          fzeta(ioff), 1 )
                        ! calculate fzeta = f_lda * zeta
                        call dmultiply_vec( ngrid, fxc(1,rsp,csp), fzeta(ioff) ) 
@@ -506,13 +505,12 @@ subroutine isdf_parallel_sym( gvec, pol_in, kpt, n_intp_r, intp_r, &
                  endif ! kflag < 2 
                  !
                  ! Mmtrx is a symmetric matrix
-                 ! So we start the do loop from "ipair1" to "n_intp * spin"
                  !
                  do ipe = 0, w_grp%npes-1
                     ! ii is real row index
                     ii = w_grp%mygr*w_grp%npes+i_row+ipe
                     ioff=w_grp%ldn*ipe+1
-                    do i_col = 1, n_intp
+                    do i_col = 1, n_intp_r
                       !
                       if (rsp == csp .and. i_col < ii) cycle
                       !
@@ -521,7 +519,7 @@ subroutine isdf_parallel_sym( gvec, pol_in, kpt, n_intp_r, intp_r, &
                       !
                       if ( kflag > 0 ) then
                         Mmtrx( ii, i_col, rsp, csp, ikp, 2, jrp ) = &
-                          ddot( ngrid, zeta( 1, i_col, csp, ikp ), 1, fzeta(ioff), 1 ) / gvec%hcub
+                          ddot( ngrid, zeta( 1, i_col, csp, jrp ), 1, fzeta(ioff), 1 ) / gvec%hcub
                         !
                         ! Mmtrx is a symmetric matrix
                         !
@@ -530,7 +528,7 @@ subroutine isdf_parallel_sym( gvec, pol_in, kpt, n_intp_r, intp_r, &
                       endif
                       if ( kflag < 2 ) then
                         Mmtrx( ii, i_col, rsp, csp, ikp, 1, jrp ) = &
-                          ddot( ngrid, zeta( 1, i_col, csp, ikp ), 1, rho_h_distr(ioff), 1 ) / gvec%hcub
+                          ddot( ngrid, zeta( 1, i_col, csp, jrp ), 1, rho_h_distr(ioff), 1 ) / gvec%hcub
                         !
                         ! Mmtrx is a symmetric matrix
                         !
@@ -576,7 +574,7 @@ subroutine isdf_parallel_sym( gvec, pol_in, kpt, n_intp_r, intp_r, &
   endif
   DEALLOCATE(zeta) ! no longer needed
   DEALLOCATE(rho_h)
-  DEALLOCATE(rho_h_local)
+  DEALLOCATE(rho_h_distr)
   !
   if ( kflag > 0 ) then
      do jrp = 1, gvec%syms%ntrans
